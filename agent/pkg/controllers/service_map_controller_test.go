@@ -7,12 +7,12 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/up9inc/mizu/agent/pkg/servicemap"
+	"github.com/kubeshark/kubeshark/agent/pkg/dependency"
+	"github.com/kubeshark/kubeshark/agent/pkg/servicemap"
 
 	"github.com/gin-gonic/gin"
+	tapApi "github.com/kubeshark/kubeshark/tap/api"
 	"github.com/stretchr/testify/suite"
-	"github.com/up9inc/mizu/shared"
-	tapApi "github.com/up9inc/mizu/tap/api"
 )
 
 const (
@@ -36,12 +36,14 @@ var (
 )
 
 var ProtocolHttp = &tapApi.Protocol{
-	Name:            "http",
+	ProtocolSummary: tapApi.ProtocolSummary{
+		Name:         "http",
+		Version:      "1.1",
+		Abbreviation: "HTTP",
+	},
 	LongName:        "Hypertext Transfer Protocol -- HTTP/1.1",
-	Abbreviation:    "HTTP",
 	Macro:           "http",
-	Version:         "1.1",
-	BackgroundColor: "#205cf5",
+	BackgroundColor: "#326de6",
 	ForegroundColor: "#ffffff",
 	FontSize:        12,
 	ReferenceLink:   "https://datatracker.ietf.org/doc/html/rfc2616",
@@ -58,11 +60,11 @@ type ServiceMapControllerSuite struct {
 }
 
 func (s *ServiceMapControllerSuite) SetupTest() {
+	dependency.RegisterGenerator(dependency.ServiceMapGeneratorDependency, func() interface{} { return servicemap.GetDefaultServiceMapInstance() })
+
 	s.c = NewServiceMapController()
-	s.c.service.SetConfig(&shared.MizuAgentConfig{
-		ServiceMap: true,
-	})
-	s.c.service.NewTCPEntry(TCPEntryA, TCPEntryB, ProtocolHttp)
+	s.c.service.Enable()
+	s.c.service.(servicemap.ServiceMapSink).NewTCPEntry(TCPEntryA, TCPEntryB, ProtocolHttp)
 
 	s.w = httptest.NewRecorder()
 	s.g, _ = gin.CreateTestContext(s.w)
@@ -101,16 +103,18 @@ func (s *ServiceMapControllerSuite) TestGet() {
 
 	// response nodes
 	aNode := servicemap.ServiceMapNode{
-		Id:    1,
-		Name:  TCPEntryA.IP,
-		Entry: TCPEntryA,
-		Count: 1,
+		Id:       1,
+		Name:     TCPEntryA.Name,
+		Entry:    TCPEntryA,
+		Resolved: true,
+		Count:    1,
 	}
 	bNode := servicemap.ServiceMapNode{
-		Id:    2,
-		Name:  TCPEntryB.IP,
-		Entry: TCPEntryB,
-		Count: 1,
+		Id:       2,
+		Name:     TCPEntryB.Name,
+		Entry:    TCPEntryB,
+		Resolved: true,
+		Count:    1,
 	}
 	assert.Contains(response.Nodes, aNode)
 	assert.Contains(response.Nodes, bNode)

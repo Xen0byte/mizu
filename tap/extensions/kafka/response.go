@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/up9inc/mizu/tap/api"
+	"github.com/kubeshark/kubeshark/tap/api"
 )
 
 type Response struct {
@@ -16,7 +16,7 @@ type Response struct {
 	CaptureTime   time.Time   `json:"captureTime"`
 }
 
-func ReadResponse(r io.Reader, tcpID *api.TcpID, superTimer *api.SuperTimer, emitter api.Emitter) (err error) {
+func ReadResponse(r io.Reader, capture api.Capture, tcpID *api.TcpID, counterPair *api.CounterPair, captureTime time.Time, emitter api.Emitter, reqResMatcher *requestResponseMatcher) (err error) {
 	d := &decoder{reader: r, remain: 4}
 	size := d.readInt32()
 
@@ -25,6 +25,9 @@ func ReadResponse(r io.Reader, tcpID *api.TcpID, superTimer *api.SuperTimer, emi
 	}
 
 	if size < 4 {
+		if size == 0 {
+			return io.EOF
+		}
 		return fmt.Errorf("A Kafka response header cannot be smaller than 8 bytes")
 	}
 
@@ -40,11 +43,11 @@ func ReadResponse(r io.Reader, tcpID *api.TcpID, superTimer *api.SuperTimer, emi
 		Size:          size,
 		CorrelationID: correlationID,
 		Payload:       payload,
-		CaptureTime:   superTimer.CaptureTime,
+		CaptureTime:   captureTime,
 	}
 
 	key := fmt.Sprintf(
-		"%s:%s->%s:%s::%d",
+		"%s_%s_%s_%s_%d",
 		tcpID.DstIP,
 		tcpID.DstPort,
 		tcpID.SrcIP,
@@ -53,7 +56,7 @@ func ReadResponse(r io.Reader, tcpID *api.TcpID, superTimer *api.SuperTimer, emi
 	)
 	reqResPair := reqResMatcher.registerResponse(key, response)
 	if reqResPair == nil {
-		return fmt.Errorf("Couldn't match a Kafka response to a Kafka request in 3 seconds!")
+		return fmt.Errorf("Couldn't match a Kafka response to a Kafka request in %d milliseconds!", reqResMatcher.maxTry)
 	}
 	apiKey := reqResPair.Request.ApiKey
 	apiVersion := reqResPair.Request.ApiVersion
@@ -255,12 +258,14 @@ func ReadResponse(r io.Reader, tcpID *api.TcpID, superTimer *api.SuperTimer, emi
 
 	item := &api.OutputChannelItem{
 		Protocol:       _protocol,
+		Capture:        capture,
 		Timestamp:      reqResPair.Request.CaptureTime.UnixNano() / int64(time.Millisecond),
 		ConnectionInfo: connectionInfo,
 		Pair: &api.RequestResponsePair{
 			Request: api.GenericMessage{
 				IsRequest:   true,
 				CaptureTime: reqResPair.Request.CaptureTime,
+				CaptureSize: int(reqResPair.Request.Size),
 				Payload: KafkaPayload{
 					Data: &KafkaWrapper{
 						Method:  apiNames[apiKey],
@@ -272,6 +277,7 @@ func ReadResponse(r io.Reader, tcpID *api.TcpID, superTimer *api.SuperTimer, emi
 			Response: api.GenericMessage{
 				IsRequest:   false,
 				CaptureTime: reqResPair.Response.CaptureTime,
+				CaptureSize: int(reqResPair.Response.Size),
 				Payload: KafkaPayload{
 					Data: &KafkaWrapper{
 						Method:  apiNames[apiKey],
@@ -284,57 +290,12 @@ func ReadResponse(r io.Reader, tcpID *api.TcpID, superTimer *api.SuperTimer, emi
 	}
 	emitter.Emit(item)
 
-	if i := int(apiKey); i < 0 || i >= len(apiTypes) {
+	if i := int(apiKey); i < 0 || i >= numApis {
 		err = fmt.Errorf("unsupported api key: %d", i)
-		return err
-	}
-
-	t := &apiTypes[apiKey]
-	if t == nil {
-		err = fmt.Errorf("unsupported api: %s", apiNames[apiKey])
 		return err
 	}
 
 	d.discardAll()
 
 	return nil
-}
-
-func WriteResponse(w io.Writer, apiVersion int16, correlationID int32, msg Message) error {
-	apiKey := msg.ApiKey()
-
-	if i := int(apiKey); i < 0 || i >= len(apiTypes) {
-		return fmt.Errorf("unsupported api key: %d", i)
-	}
-
-	t := &apiTypes[apiKey]
-	if t == nil {
-		return fmt.Errorf("unsupported api: %s", apiNames[apiKey])
-	}
-
-	minVersion := t.minVersion()
-	maxVersion := t.maxVersion()
-
-	if apiVersion < minVersion || apiVersion > maxVersion {
-		return fmt.Errorf("unsupported %s version: v%d not in range v%d-v%d", apiKey, apiVersion, minVersion, maxVersion)
-	}
-
-	r := &t.responses[apiVersion-minVersion]
-	v := valueOf(msg)
-	b := newPageBuffer()
-	defer b.unref()
-
-	e := &encoder{writer: b}
-	e.writeInt32(0) // placeholder for the response size
-	e.writeInt32(correlationID)
-	r.encode(e, v)
-	err := e.err
-
-	if err == nil {
-		size := packUint32(uint32(b.Size()) - 4)
-		_, _ = b.WriteAt(size[:], 0)
-		_, err = b.WriteTo(w)
-	}
-
-	return err
 }

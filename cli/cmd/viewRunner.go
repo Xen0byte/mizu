@@ -3,19 +3,19 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"github.com/up9inc/mizu/cli/utils"
 	"net/http"
 
-	"github.com/up9inc/mizu/cli/apiserver"
-	"github.com/up9inc/mizu/cli/config"
-	"github.com/up9inc/mizu/cli/mizu/fsUtils"
-	"github.com/up9inc/mizu/cli/mizu/version"
-	"github.com/up9inc/mizu/cli/uiUtils"
-	"github.com/up9inc/mizu/shared/kubernetes"
-	"github.com/up9inc/mizu/shared/logger"
+	"github.com/kubeshark/kubeshark/cli/utils"
+
+	"github.com/kubeshark/kubeshark/cli/apiserver"
+	"github.com/kubeshark/kubeshark/cli/config"
+	"github.com/kubeshark/kubeshark/cli/kubeshark/fsUtils"
+	"github.com/kubeshark/kubeshark/cli/uiUtils"
+	"github.com/kubeshark/kubeshark/logger"
+	"github.com/kubeshark/kubeshark/shared/kubernetes"
 )
 
-func runMizuView() {
+func runKubesharkView() {
 	kubernetesProvider, err := getKubernetesProviderForCli()
 	if err != nil {
 		return
@@ -27,19 +27,19 @@ func runMizuView() {
 	url := config.Config.View.Url
 
 	if url == "" {
-		exists, err := kubernetesProvider.DoesServiceExist(ctx, config.Config.MizuResourcesNamespace, kubernetes.ApiServerPodName)
+		exists, err := kubernetesProvider.DoesServiceExist(ctx, config.Config.KubesharkResourcesNamespace, kubernetes.ApiServerPodName)
 		if err != nil {
-			logger.Log.Errorf("Failed to found mizu service %v", err)
+			logger.Log.Errorf("Failed to found kubeshark service %v", err)
 			cancel()
 			return
 		}
 		if !exists {
-			logger.Log.Infof("%s service not found, you should run `mizu tap` command first", kubernetes.ApiServerPodName)
+			logger.Log.Infof("%s service not found, you should run `kubeshark tap` command first", kubernetes.ApiServerPodName)
 			cancel()
 			return
 		}
 
-		url = GetApiServerUrl()
+		url = GetApiServerUrl(config.Config.View.GuiPort)
 
 		response, err := http.Get(fmt.Sprintf("%s/", url))
 		if err == nil && response.StatusCode == 200 {
@@ -47,7 +47,7 @@ func runMizuView() {
 			return
 		}
 		logger.Log.Infof("Establishing connection to k8s cluster...")
-		startProxyReportErrorIfAny(kubernetesProvider, ctx, cancel)
+		startProxyReportErrorIfAny(kubernetesProvider, ctx, cancel, config.Config.View.GuiPort)
 	}
 
 	apiServerProvider := apiserver.NewProvider(url, apiserver.DefaultRetries, apiserver.DefaultTimeout)
@@ -56,19 +56,10 @@ func runMizuView() {
 		return
 	}
 
-	logger.Log.Infof("Mizu is available at %s", url)
+	logger.Log.Infof("Kubeshark is available at %s", url)
 
 	if !config.Config.HeadlessMode {
 		uiUtils.OpenBrowser(url)
-	}
-
-	if isCompatible, err := version.CheckVersionCompatibility(apiServerProvider); err != nil {
-		logger.Log.Errorf("Failed to check versions compatibility %v", err)
-		cancel()
-		return
-	} else if !isCompatible {
-		cancel()
-		return
 	}
 
 	utils.WaitForFinish(ctx, cancel)

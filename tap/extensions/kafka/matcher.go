@@ -3,24 +3,31 @@ package kafka
 import (
 	"sync"
 	"time"
-)
 
-var reqResMatcher = CreateResponseRequestMatcher() // global
-const maxTry int = 3000
+	"github.com/kubeshark/kubeshark/tap/api"
+)
 
 type RequestResponsePair struct {
 	Request  Request
 	Response Response
 }
 
-// Key is {client_addr}:{client_port}->{dest_addr}:{dest_port}::{correlation_id}
+// Key is {client_addr}_{client_port}_{dest_addr}_{dest_port}_{correlation_id}
 type requestResponseMatcher struct {
 	openMessagesMap *sync.Map
+	maxTry          int
 }
 
-func CreateResponseRequestMatcher() requestResponseMatcher {
-	newMatcher := &requestResponseMatcher{openMessagesMap: &sync.Map{}}
-	return *newMatcher
+func createResponseRequestMatcher() api.RequestResponseMatcher {
+	return &requestResponseMatcher{openMessagesMap: &sync.Map{}, maxTry: 3000}
+}
+
+func (matcher *requestResponseMatcher) GetMap() *sync.Map {
+	return matcher.openMessagesMap
+}
+
+func (matcher *requestResponseMatcher) SetMaxTry(value int) {
+	matcher.maxTry = value
 }
 
 func (matcher *requestResponseMatcher) registerRequest(key string, request *Request) *RequestResponsePair {
@@ -40,7 +47,7 @@ func (matcher *requestResponseMatcher) registerResponse(key string, response *Re
 	try := 0
 	for {
 		try++
-		if try > maxTry {
+		if try > matcher.maxTry {
 			return nil
 		}
 		if request, found := matcher.openMessagesMap.LoadAndDelete(key); found {

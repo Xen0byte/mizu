@@ -5,9 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	tapApi "github.com/kubeshark/kubeshark/tap/api"
 	"github.com/stretchr/testify/suite"
-	"github.com/up9inc/mizu/shared"
-	tapApi "github.com/up9inc/mizu/tap/api"
 )
 
 const (
@@ -51,12 +50,14 @@ var (
 		IP:   fmt.Sprintf("%s.%s", Ip, UnresolvedNodeName),
 	}
 	ProtocolHttp = &tapApi.Protocol{
-		Name:            "http",
+		ProtocolSummary: tapApi.ProtocolSummary{
+			Name:         "http",
+			Version:      "1.1",
+			Abbreviation: "HTTP",
+		},
 		LongName:        "Hypertext Transfer Protocol -- HTTP/1.1",
-		Abbreviation:    "HTTP",
 		Macro:           "http",
-		Version:         "1.1",
-		BackgroundColor: "#205cf5",
+		BackgroundColor: "#326de6",
 		ForegroundColor: "#ffffff",
 		FontSize:        12,
 		ReferenceLink:   "https://datatracker.ietf.org/doc/html/rfc2616",
@@ -64,11 +65,13 @@ var (
 		Priority:        0,
 	}
 	ProtocolRedis = &tapApi.Protocol{
-		Name:            "redis",
+		ProtocolSummary: tapApi.ProtocolSummary{
+			Name:         "redis",
+			Version:      "3.x",
+			Abbreviation: "REDIS",
+		},
 		LongName:        "Redis Serialization Protocol",
-		Abbreviation:    "REDIS",
 		Macro:           "redis",
-		Version:         "3.x",
 		BackgroundColor: "#a41e11",
 		ForegroundColor: "#ffffff",
 		FontSize:        11,
@@ -81,24 +84,22 @@ var (
 type ServiceMapDisabledSuite struct {
 	suite.Suite
 
-	instance ServiceMap
+	instance *defaultServiceMap
 }
 
 type ServiceMapEnabledSuite struct {
 	suite.Suite
 
-	instance ServiceMap
+	instance *defaultServiceMap
 }
 
 func (s *ServiceMapDisabledSuite) SetupTest() {
-	s.instance = GetInstance()
+	s.instance = GetDefaultServiceMapInstance()
 }
 
 func (s *ServiceMapEnabledSuite) SetupTest() {
-	s.instance = GetInstance()
-	s.instance.SetConfig(&shared.MizuAgentConfig{
-		ServiceMap: true,
-	})
+	s.instance = GetDefaultServiceMapInstance()
+	s.instance.Enable()
 }
 
 func (s *ServiceMapDisabledSuite) TestServiceMapInstance() {
@@ -110,7 +111,7 @@ func (s *ServiceMapDisabledSuite) TestServiceMapInstance() {
 func (s *ServiceMapDisabledSuite) TestServiceMapSingletonInstance() {
 	assert := s.Assert()
 
-	instance2 := GetInstance()
+	instance2 := GetDefaultServiceMapInstance()
 
 	assert.NotNil(s.instance)
 	assert.NotNil(instance2)
@@ -268,9 +269,14 @@ func (s *ServiceMapEnabledSuite) TestServiceMap() {
 		assert.LessOrEqual(node.Id, expectedNodeCount)
 
 		// entry
-		// node.Name is the key of the node, key = entry.IP
+		// node.Name is the key of the node, key = entry.Name by default
 		// entry.Name is the name of the service and could be unresolved
-		assert.Equal(node.Name, node.Entry.IP)
+		// when entry.Name is unresolved, key = entry.IP
+		if node.Entry.Name == UnresolvedNodeName {
+			assert.Equal(node.Name, node.Entry.IP)
+		} else {
+			assert.Equal(node.Name, node.Entry.Name)
+		}
 		assert.Equal(Port, node.Entry.Port)
 		assert.Equal(entryName, node.Entry.Name)
 
@@ -320,16 +326,24 @@ func (s *ServiceMapEnabledSuite) TestServiceMap() {
 	cdEdge := -1
 	acEdge := -1
 	var validateEdge = func(edge ServiceMapEdge, sourceEntryName string, destEntryName string, protocolName string, protocolCount int) {
-		// source
+		// source node
 		assert.Contains(nodeIds, edge.Source.Id)
 		assert.LessOrEqual(edge.Source.Id, expectedNodeCount)
-		assert.Equal(edge.Source.Name, edge.Source.Entry.IP)
+		if edge.Source.Entry.Name == UnresolvedNodeName {
+			assert.Equal(edge.Source.Name, edge.Source.Entry.IP)
+		} else {
+			assert.Equal(edge.Source.Name, edge.Source.Entry.Name)
+		}
 		assert.Equal(sourceEntryName, edge.Source.Entry.Name)
 
-		// destination
+		// destination node
 		assert.Contains(nodeIds, edge.Destination.Id)
 		assert.LessOrEqual(edge.Destination.Id, expectedNodeCount)
-		assert.Equal(edge.Destination.Name, edge.Destination.Entry.IP)
+		if edge.Destination.Entry.Name == UnresolvedNodeName {
+			assert.Equal(edge.Destination.Name, edge.Destination.Entry.IP)
+		} else {
+			assert.Equal(edge.Destination.Name, edge.Destination.Entry.Name)
+		}
 		assert.Equal(destEntryName, edge.Destination.Entry.Name)
 
 		// protocol
@@ -393,10 +407,10 @@ func (s *ServiceMapEnabledSuite) TestServiceMap() {
 	assert.Equal(0, status.EdgeCount)
 
 	// Nodes after reset
-	assert.Equal([]ServiceMapNode(nil), nodes)
+	assert.Equal([]ServiceMapNode{}, nodes)
 
 	// Edges after reset
-	assert.Equal([]ServiceMapEdge(nil), edges)
+	assert.Equal([]ServiceMapEdge{}, edges)
 }
 
 func TestServiceMapSuite(t *testing.T) {

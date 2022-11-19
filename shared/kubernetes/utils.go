@@ -3,14 +3,13 @@ package kubernetes
 import (
 	"regexp"
 
-	"github.com/up9inc/mizu/shared"
+	"github.com/kubeshark/kubeshark/shared"
 	core "k8s.io/api/core/v1"
-	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func GetNodeHostToTappedPodsMap(tappedPods []core.Pod) map[string][]core.Pod {
-	nodeToTappedPodMap := make(map[string][]core.Pod)
+func GetNodeHostToTappedPodsMap(tappedPods []core.Pod) shared.NodeToPodsMap {
+	nodeToTappedPodMap := make(shared.NodeToPodsMap)
 	for _, pod := range tappedPods {
 		minimizedPod := getMinimizedPod(pod)
 
@@ -27,25 +26,39 @@ func GetNodeHostToTappedPodsMap(tappedPods []core.Pod) map[string][]core.Pod {
 func getMinimizedPod(fullPod core.Pod) core.Pod {
 	return core.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: fullPod.Name,
+			Name:      fullPod.Name,
+			Namespace: fullPod.Namespace,
 		},
-		Status: v1.PodStatus{
-			PodIP: fullPod.Status.PodIP,
+		Status: core.PodStatus{
+			PodIP:             fullPod.Status.PodIP,
+			ContainerStatuses: getMinimizedContainerStatuses(fullPod),
 		},
 	}
 }
 
-func excludeMizuPods(pods []core.Pod) []core.Pod {
-	mizuPrefixRegex := regexp.MustCompile("^" + MizuResourcesPrefix)
+func getMinimizedContainerStatuses(fullPod core.Pod) []core.ContainerStatus {
+	result := make([]core.ContainerStatus, len(fullPod.Status.ContainerStatuses))
 
-	nonMizuPods := make([]core.Pod, 0)
-	for _, pod := range pods {
-		if !mizuPrefixRegex.MatchString(pod.Name) {
-			nonMizuPods = append(nonMizuPods, pod)
+	for i, container := range fullPod.Status.ContainerStatuses {
+		result[i] = core.ContainerStatus{
+			ContainerID: container.ContainerID,
 		}
 	}
 
-	return nonMizuPods
+	return result
+}
+
+func excludeKubesharkPods(pods []core.Pod) []core.Pod {
+	kubesharkPrefixRegex := regexp.MustCompile("^" + KubesharkResourcesPrefix)
+
+	nonKubesharkPods := make([]core.Pod, 0)
+	for _, pod := range pods {
+		if !kubesharkPrefixRegex.MatchString(pod.Name) {
+			nonKubesharkPods = append(nonKubesharkPods, pod)
+		}
+	}
+
+	return nonKubesharkPods
 }
 
 func getPodArrayDiff(oldPods []core.Pod, newPods []core.Pod) (added []core.Pod, removed []core.Pod) {

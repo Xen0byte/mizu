@@ -4,24 +4,26 @@ import (
 	"encoding/json"
 	"io/ioutil"
 	"os"
+	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/chanced/openapi"
-	"github.com/op/go-logging"
-	"github.com/up9inc/mizu/agent/pkg/har"
-	"github.com/up9inc/mizu/shared/logger"
+	"github.com/kubeshark/kubeshark/agent/pkg/har"
+	"github.com/kubeshark/kubeshark/logger"
+	"github.com/wI2L/jsondiff"
 )
 
 // if started via env, write file into subdir
-func outputSpec(label string, spec *openapi.OpenAPI, t *testing.T) {
-	content, err := json.MarshalIndent(spec, "", "\t")
+func outputSpec(label string, spec *openapi.OpenAPI, t *testing.T) string {
+	content, err := json.MarshalIndent(spec, "", "  ")
 	if err != nil {
 		panic(err)
 	}
 
-	if os.Getenv("MIZU_OAS_WRITE_FILES") != "" {
+	if os.Getenv("KUBESHARK_OAS_WRITE_FILES") != "" {
 		path := "./oas-samples"
 		err := os.MkdirAll(path, 0o755)
 		if err != nil {
@@ -35,28 +37,46 @@ func outputSpec(label string, spec *openapi.OpenAPI, t *testing.T) {
 	} else {
 		t.Logf("%s", string(content))
 	}
+	return string(content)
 }
 
 func TestEntries(t *testing.T) {
-	logger.InitLoggerStderrOnly(logging.INFO)
+	//logger.InitLoggerStd(logging.INFO) causes race condition
 	files, err := getFiles("./test_artifacts/")
 	if err != nil {
 		t.Log(err)
 		t.FailNow()
 	}
-	GetOasGeneratorInstance().Start()
-	loadStartingOAS()
 
-	cnt, err := feedEntries(files, true)
+	gen := NewDefaultOasGenerator(-1)
+	gen.serviceSpecs = new(sync.Map)
+	loadStartingOAS("test_artifacts/catalogue.json", "catalogue", gen.serviceSpecs)
+	loadStartingOAS("test_artifacts/trcc.json", "trcc-api-service", gen.serviceSpecs)
+
+	go func() {
+		for {
+			time.Sleep(1 * time.Second)
+			gen.serviceSpecs.Range(func(key, val interface{}) bool {
+				svc := key.(string)
+				t.Logf("Getting spec for %s", svc)
+				gen := val.(*SpecGen)
+				_, err := gen.GetSpec()
+				if err != nil {
+					t.Error(err)
+				}
+				return true
+			})
+		}
+	}()
+
+	cnt, err := feedEntries(files, true, gen)
 	if err != nil {
 		t.Log(err)
 		t.Fail()
 	}
 
-	waitQueueProcessed()
-
 	svcs := strings.Builder{}
-	GetOasGeneratorInstance().ServiceSpecs.Range(func(key, val interface{}) bool {
+	gen.serviceSpecs.Range(func(key, val interface{}) bool {
 		gen := val.(*SpecGen)
 		svc := key.(string)
 		svcs.WriteString(svc + ",")
@@ -78,7 +98,7 @@ func TestEntries(t *testing.T) {
 		return true
 	})
 
-	GetOasGeneratorInstance().ServiceSpecs.Range(func(key, val interface{}) bool {
+	gen.serviceSpecs.Range(func(key, val interface{}) bool {
 		svc := key.(string)
 		gen := val.(*SpecGen)
 		spec, err := gen.GetSpec()
@@ -102,19 +122,18 @@ func TestEntries(t *testing.T) {
 }
 
 func TestFileSingle(t *testing.T) {
-	GetOasGeneratorInstance().Start()
+	gen := NewDefaultOasGenerator(-1)
+	gen.serviceSpecs = new(sync.Map)
 	// loadStartingOAS()
 	file := "test_artifacts/params.har"
 	files := []string{file}
-	cnt, err := feedEntries(files, true)
+	cnt, err := feedEntries(files, true, gen)
 	if err != nil {
 		logger.Log.Warning("Failed processing file: " + err.Error())
 		t.Fail()
 	}
 
-	waitQueueProcessed()
-
-	GetOasGeneratorInstance().ServiceSpecs.Range(func(key, val interface{}) bool {
+	gen.serviceSpecs.Range(func(key, val interface{}) bool {
 		svc := key.(string)
 		gen := val.(*SpecGen)
 		spec, err := gen.GetSpec()
@@ -123,12 +142,42 @@ func TestFileSingle(t *testing.T) {
 			t.FailNow()
 		}
 
-		outputSpec(svc, spec, t)
+		specText := outputSpec(svc, spec, t)
 
 		err = spec.Validate()
 		if err != nil {
 			t.Log(err)
 			t.FailNow()
+		}
+
+		expected, err := ioutil.ReadFile(file + ".spec.json")
+		if err != nil {
+			t.Errorf(err.Error())
+			t.FailNow()
+		}
+
+		patFloatPrecision := regexp.MustCompile(`(\d+\.\d{1,2})(\d*)`)
+
+		expected = []byte(patUuid4.ReplaceAllString(string(expected), "<UUID4>"))
+		specText = patUuid4.ReplaceAllString(specText, "<UUID4>")
+		expected = []byte(patFloatPrecision.ReplaceAllString(string(expected), "$1"))
+		specText = patFloatPrecision.ReplaceAllString(specText, "$1")
+
+		diff, err := jsondiff.CompareJSON(expected, []byte(specText))
+		if err != nil {
+			t.Errorf(err.Error())
+			t.FailNow()
+		}
+
+		if os.Getenv("KUBESHARK_OAS_WRITE_FILES") != "" {
+			err = ioutil.WriteFile(file+".spec.json", []byte(specText), 0644)
+			if err != nil {
+				panic(err)
+			}
+		}
+
+		if len(diff) > 0 {
+			t.Errorf("Generated spec does not match expected:\n%s", diff.String())
 		}
 
 		return true
@@ -137,19 +186,7 @@ func TestFileSingle(t *testing.T) {
 	logger.Log.Infof("Processed entries: %d", cnt)
 }
 
-func waitQueueProcessed() {
-	for {
-		time.Sleep(100 * time.Millisecond)
-		queue := len(GetOasGeneratorInstance().entriesChan)
-		logger.Log.Infof("Queue: %d", queue)
-		if queue < 1 {
-			break
-		}
-	}
-}
-
-func loadStartingOAS() {
-	file := "test_artifacts/catalogue.json"
+func loadStartingOAS(file string, label string, specs *sync.Map) {
 	fd, err := os.Open(file)
 	if err != nil {
 		panic(err)
@@ -168,15 +205,17 @@ func loadStartingOAS() {
 		panic(err)
 	}
 
-	gen := NewGen("catalogue")
+	gen := NewGen(label)
 	gen.StartFromSpec(doc)
 
-	GetOasGeneratorInstance().ServiceSpecs.Store("catalogue", gen)
+	specs.Store(label, gen)
 }
 
 func TestEntriesNegative(t *testing.T) {
+	gen := NewDefaultOasGenerator(-1)
+	gen.serviceSpecs = new(sync.Map)
 	files := []string{"invalid"}
-	_, err := feedEntries(files, false)
+	_, err := feedEntries(files, false, gen)
 	if err == nil {
 		t.Logf("Should have failed")
 		t.Fail()
@@ -184,8 +223,10 @@ func TestEntriesNegative(t *testing.T) {
 }
 
 func TestEntriesPositive(t *testing.T) {
+	gen := NewDefaultOasGenerator(-1)
+	gen.serviceSpecs = new(sync.Map)
 	files := []string{"test_artifacts/params.har"}
-	_, err := feedEntries(files, false)
+	_, err := feedEntries(files, false, gen)
 	if err != nil {
 		t.Logf("Failed")
 		t.Fail()

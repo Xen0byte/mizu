@@ -11,23 +11,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/up9inc/mizu/agent/pkg/elastic"
-	"github.com/up9inc/mizu/agent/pkg/har"
-	"github.com/up9inc/mizu/agent/pkg/holder"
-	"github.com/up9inc/mizu/agent/pkg/providers"
+	"github.com/kubeshark/kubeshark/agent/pkg/dependency"
+	"github.com/kubeshark/kubeshark/agent/pkg/oas"
+	"github.com/kubeshark/kubeshark/agent/pkg/servicemap"
 
-	"github.com/up9inc/mizu/agent/pkg/servicemap"
+	"github.com/kubeshark/kubeshark/agent/pkg/har"
+	"github.com/kubeshark/kubeshark/agent/pkg/holder"
+	"github.com/kubeshark/kubeshark/agent/pkg/providers"
 
-	"github.com/up9inc/mizu/agent/pkg/models"
-	"github.com/up9inc/mizu/agent/pkg/oas"
-	"github.com/up9inc/mizu/agent/pkg/resolver"
-	"github.com/up9inc/mizu/agent/pkg/utils"
+	"github.com/kubeshark/kubeshark/agent/pkg/resolver"
+	"github.com/kubeshark/kubeshark/agent/pkg/utils"
 
-	"github.com/up9inc/mizu/shared"
-	"github.com/up9inc/mizu/shared/logger"
-	tapApi "github.com/up9inc/mizu/tap/api"
-
-	basenine "github.com/up9inc/basenine/client/go"
+	"github.com/kubeshark/kubeshark/logger"
+	tapApi "github.com/kubeshark/kubeshark/tap/api"
 )
 
 var k8sResolver *resolver.Resolver
@@ -102,81 +98,69 @@ func startReadingChannel(outputItems <-chan *tapApi.OutputChannelItem, extension
 		panic("Channel of captured messages is nil")
 	}
 
-	connection, err := basenine.NewConnection(shared.BasenineHost, shared.BaseninePort)
-	if err != nil {
-		panic(err)
-	}
-	connection.InsertMode()
-
-	disableOASValidation := false
-	ctx := context.Background()
-	doc, contractContent, router, err := loadOAS(ctx)
-	if err != nil {
-		logger.Log.Infof("Disabled OAS validation: %s", err.Error())
-		disableOASValidation = true
-	}
-
 	for item := range outputItems {
 		extension := extensionsMap[item.Protocol.Name]
-		resolvedSource, resolvedDestionation := resolveIP(item.ConnectionInfo)
-		mizuEntry := extension.Dissector.Analyze(item, resolvedSource, resolvedDestionation)
-		if extension.Protocol.Name == "http" {
-			if !disableOASValidation {
-				var httpPair tapApi.HTTPRequestResponsePair
-				if err := json.Unmarshal([]byte(mizuEntry.HTTPPair), &httpPair); err != nil {
-					logger.Log.Error(err)
-				}
+		resolvedSource, resolvedDestination, namespace := resolveIP(item.ConnectionInfo)
 
-				contract := handleOAS(ctx, doc, router, httpPair.Request.Payload.RawRequest, httpPair.Response.Payload.RawResponse, contractContent)
-				mizuEntry.ContractStatus = contract.Status
-				mizuEntry.ContractRequestReason = contract.RequestReason
-				mizuEntry.ContractResponseReason = contract.ResponseReason
-				mizuEntry.ContractContent = contract.Content
-			}
-
-			harEntry, err := har.NewEntry(mizuEntry.Request, mizuEntry.Response, mizuEntry.StartTime, mizuEntry.ElapsedTime)
-			if err == nil {
-				rules, _, _ := models.RunValidationRulesState(*harEntry, mizuEntry.Destination.Name)
-				mizuEntry.Rules = rules
-			}
-
-			oas.GetOasGeneratorInstance().PushEntry(harEntry)
+		if namespace == "" && item.Namespace != tapApi.UnknownNamespace {
+			namespace = item.Namespace
 		}
 
-		data, err := json.Marshal(mizuEntry)
+		kubesharkEntry := extension.Dissector.Analyze(item, resolvedSource, resolvedDestination, namespace)
+
+		data, err := json.Marshal(kubesharkEntry)
 		if err != nil {
-			panic(err)
+			logger.Log.Errorf("Error while marshaling entry: %v", err)
+			continue
 		}
 
-		providers.EntryAdded(len(data))
+		entryInserter := dependency.GetInstance(dependency.EntriesInserter).(EntryInserter)
+		if err := entryInserter.Insert(kubesharkEntry); err != nil {
+			logger.Log.Errorf("Error inserting entry, err: %v", err)
+		}
 
-		connection.SendText(string(data))
+		summary := extension.Dissector.Summarize(kubesharkEntry)
+		providers.EntryAdded(len(data), summary)
 
-		servicemap.GetInstance().NewTCPEntry(mizuEntry.Source, mizuEntry.Destination, &item.Protocol)
-		elastic.GetInstance().PushEntry(mizuEntry)
+		serviceMapGenerator := dependency.GetInstance(dependency.ServiceMapGeneratorDependency).(servicemap.ServiceMapSink)
+		serviceMapGenerator.NewTCPEntry(kubesharkEntry.Source, kubesharkEntry.Destination, &item.Protocol)
+
+		oasGenerator := dependency.GetInstance(dependency.OasGeneratorDependency).(oas.OasGeneratorSink)
+		oasGenerator.HandleEntry(kubesharkEntry)
 	}
 }
 
-func resolveIP(connectionInfo *tapApi.ConnectionInfo) (resolvedSource string, resolvedDestination string) {
+func resolveIP(connectionInfo *tapApi.ConnectionInfo) (resolvedSource string, resolvedDestination string, namespace string) {
 	if k8sResolver != nil {
 		unresolvedSource := connectionInfo.ClientIP
-		resolvedSource = k8sResolver.Resolve(unresolvedSource)
-		if resolvedSource == "" {
+		resolvedSourceObject := k8sResolver.Resolve(unresolvedSource)
+		if resolvedSourceObject == nil {
 			logger.Log.Debugf("Cannot find resolved name to source: %s", unresolvedSource)
 			if os.Getenv("SKIP_NOT_RESOLVED_SOURCE") == "1" {
 				return
 			}
+		} else {
+			resolvedSource = resolvedSourceObject.FullAddress
+			namespace = resolvedSourceObject.Namespace
 		}
+
 		unresolvedDestination := fmt.Sprintf("%s:%s", connectionInfo.ServerIP, connectionInfo.ServerPort)
-		resolvedDestination = k8sResolver.Resolve(unresolvedDestination)
-		if resolvedDestination == "" {
+		resolvedDestinationObject := k8sResolver.Resolve(unresolvedDestination)
+		if resolvedDestinationObject == nil {
 			logger.Log.Debugf("Cannot find resolved name to dest: %s", unresolvedDestination)
 			if os.Getenv("SKIP_NOT_RESOLVED_DEST") == "1" {
 				return
 			}
+		} else {
+			resolvedDestination = resolvedDestinationObject.FullAddress
+			// Overwrite namespace (if it was set according to the source)
+			// Only overwrite if non-empty
+			if resolvedDestinationObject.Namespace != "" {
+				namespace = resolvedDestinationObject.Namespace
+			}
 		}
 	}
-	return resolvedSource, resolvedDestination
+	return resolvedSource, resolvedDestination, namespace
 }
 
 func CheckIsServiceIP(address string) bool {

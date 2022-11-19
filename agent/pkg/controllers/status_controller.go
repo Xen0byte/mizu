@@ -1,19 +1,23 @@
 package controllers
 
 import (
-	"encoding/json"
+	"fmt"
 	"net/http"
+	"strconv"
+	"time"
+
+	core "k8s.io/api/core/v1"
 
 	"github.com/gin-gonic/gin"
-	"github.com/up9inc/mizu/agent/pkg/api"
-	"github.com/up9inc/mizu/agent/pkg/holder"
-	"github.com/up9inc/mizu/agent/pkg/providers"
-	"github.com/up9inc/mizu/agent/pkg/providers/tappedPods"
-	"github.com/up9inc/mizu/agent/pkg/providers/tappers"
-	"github.com/up9inc/mizu/agent/pkg/up9"
-	"github.com/up9inc/mizu/agent/pkg/validation"
-	"github.com/up9inc/mizu/shared"
-	"github.com/up9inc/mizu/shared/logger"
+	"github.com/kubeshark/kubeshark/agent/pkg/api"
+	"github.com/kubeshark/kubeshark/agent/pkg/holder"
+	"github.com/kubeshark/kubeshark/agent/pkg/providers"
+	"github.com/kubeshark/kubeshark/agent/pkg/providers/tappedPods"
+	"github.com/kubeshark/kubeshark/agent/pkg/providers/tappers"
+	"github.com/kubeshark/kubeshark/agent/pkg/validation"
+	"github.com/kubeshark/kubeshark/logger"
+	"github.com/kubeshark/kubeshark/shared"
+	"github.com/kubeshark/kubeshark/shared/kubernetes"
 )
 
 func HealthCheck(c *gin.Context) {
@@ -31,26 +35,21 @@ func HealthCheck(c *gin.Context) {
 }
 
 func PostTappedPods(c *gin.Context) {
-	var requestTappedPods []*shared.PodInfo
+	var requestTappedPods []core.Pod
 	if err := c.Bind(&requestTappedPods); err != nil {
 		c.JSON(http.StatusBadRequest, err)
 		return
 	}
 
+	podInfos := kubernetes.GetPodInfosForPods(requestTappedPods)
+
 	logger.Log.Infof("[Status] POST request: %d tapped pods", len(requestTappedPods))
-	tappedPods.Set(requestTappedPods)
-	broadcastTappedPodsStatus()
-}
+	tappedPods.Set(podInfos)
+	api.BroadcastTappedPodsStatus()
 
-func broadcastTappedPodsStatus() {
-	tappedPodsStatus := tappedPods.GetTappedPodsStatus()
-
-	message := shared.CreateWebSocketStatusMessage(tappedPodsStatus)
-	if jsonBytes, err := json.Marshal(message); err != nil {
-		logger.Log.Errorf("Could not Marshal message %v", err)
-	} else {
-		api.BroadcastToBrowserClients(jsonBytes)
-	}
+	nodeToTappedPodMap := kubernetes.GetNodeHostToTappedPodsMap(requestTappedPods)
+	tappedPods.SetNodeToTappedPodMap(nodeToTappedPodMap)
+	api.BroadcastTappedPodsToTappers(nodeToTappedPodMap)
 }
 
 func PostTapperStatus(c *gin.Context) {
@@ -67,21 +66,11 @@ func PostTapperStatus(c *gin.Context) {
 
 	logger.Log.Infof("[Status] POST request, tapper status: %v", tapperStatus)
 	tappers.SetStatus(tapperStatus)
-	broadcastTappedPodsStatus()
+	api.BroadcastTappedPodsStatus()
 }
 
 func GetConnectedTappersCount(c *gin.Context) {
 	c.JSON(http.StatusOK, tappers.GetConnectedCount())
-}
-
-func GetAuthStatus(c *gin.Context) {
-	authStatus, err := providers.GetAuthStatus()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, err)
-		return
-	}
-
-	c.JSON(http.StatusOK, authStatus)
 }
 
 func GetTappingStatus(c *gin.Context) {
@@ -89,16 +78,29 @@ func GetTappingStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, tappedPodsStatus)
 }
 
-func AnalyzeInformation(c *gin.Context) {
-	c.JSON(http.StatusOK, up9.GetAnalyzeInfo())
-}
-
 func GetGeneralStats(c *gin.Context) {
 	c.JSON(http.StatusOK, providers.GetGeneralStats())
 }
 
-func GetRecentTLSLinks(c *gin.Context) {
-	c.JSON(http.StatusOK, providers.GetAllRecentTLSAddresses())
+func GetTrafficStats(c *gin.Context) {
+	startTime, endTime, err := getStartEndTime(c)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, providers.GetTrafficStats(startTime, endTime))
+}
+
+func getStartEndTime(c *gin.Context) (time.Time, time.Time, error) {
+	startTimeValue, err := strconv.Atoi(c.Query("startTimeMs"))
+	if err != nil {
+		return time.UnixMilli(0), time.UnixMilli(0), fmt.Errorf("invalid start time: %v", err)
+	}
+	endTimeValue, err := strconv.Atoi(c.Query("endTimeMs"))
+	if err != nil {
+		return time.UnixMilli(0), time.UnixMilli(0), fmt.Errorf("invalid end time: %v", err)
+	}
+	return time.UnixMilli(int64(startTimeValue)), time.UnixMilli(int64(endTimeValue)), nil
 }
 
 func GetCurrentResolvingInformation(c *gin.Context) {

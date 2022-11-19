@@ -8,17 +8,14 @@ import (
 	"io/ioutil"
 	"net/http"
 	"strings"
+	"time"
 
-	"github.com/up9inc/mizu/tap/api"
+	"github.com/kubeshark/kubeshark/tap/api"
 )
 
 func filterAndEmit(item *api.OutputChannelItem, emitter api.Emitter, options *api.TrafficFilteringOptions) {
 	if IsIgnoredUserAgent(item, options) {
 		return
-	}
-
-	if !options.DisableRedaction {
-		FilterSensitiveData(item, options)
 	}
 
 	replaceForwardedFor(item)
@@ -31,7 +28,7 @@ func replaceForwardedFor(item *api.OutputChannelItem) {
 		return
 	}
 
-	request := item.Pair.Request.Payload.(api.HTTPPayload).Data.(*http.Request)
+	request := item.Pair.Request.Payload.(HTTPPayload).Data.(*http.Request)
 
 	forwardedFor := request.Header.Get("X-Forwarded-For")
 	if forwardedFor == "" {
@@ -47,7 +44,7 @@ func replaceForwardedFor(item *api.OutputChannelItem) {
 	item.ConnectionInfo.ClientPort = ""
 }
 
-func handleHTTP2Stream(http2Assembler *Http2Assembler, tcpID *api.TcpID, superTimer *api.SuperTimer, emitter api.Emitter, options *api.TrafficFilteringOptions) error {
+func handleHTTP2Stream(http2Assembler *Http2Assembler, progress *api.ReadProgress, capture api.Capture, tcpID *api.TcpID, captureTime time.Time, emitter api.Emitter, options *api.TrafficFilteringOptions, reqResMatcher *requestResponseMatcher) error {
 	streamID, messageHTTP1, isGrpc, err := http2Assembler.readMessage()
 	if err != nil {
 		return err
@@ -58,7 +55,7 @@ func handleHTTP2Stream(http2Assembler *Http2Assembler, tcpID *api.TcpID, superTi
 	switch messageHTTP1 := messageHTTP1.(type) {
 	case http.Request:
 		ident := fmt.Sprintf(
-			"%s->%s %s->%s %d %s",
+			"%s_%s_%s_%s_%d_%s",
 			tcpID.SrcIP,
 			tcpID.DstIP,
 			tcpID.SrcPort,
@@ -66,7 +63,7 @@ func handleHTTP2Stream(http2Assembler *Http2Assembler, tcpID *api.TcpID, superTi
 			streamID,
 			"HTTP2",
 		)
-		item = reqResMatcher.registerRequest(ident, &messageHTTP1, superTimer.CaptureTime, messageHTTP1.ProtoMinor)
+		item = reqResMatcher.registerRequest(ident, &messageHTTP1, captureTime, progress.Current(), messageHTTP1.ProtoMinor)
 		if item != nil {
 			item.ConnectionInfo = &api.ConnectionInfo{
 				ClientIP:   tcpID.SrcIP,
@@ -78,7 +75,7 @@ func handleHTTP2Stream(http2Assembler *Http2Assembler, tcpID *api.TcpID, superTi
 		}
 	case http.Response:
 		ident := fmt.Sprintf(
-			"%s->%s %s->%s %d %s",
+			"%s_%s_%s_%s_%d_%s",
 			tcpID.DstIP,
 			tcpID.SrcIP,
 			tcpID.DstPort,
@@ -86,7 +83,7 @@ func handleHTTP2Stream(http2Assembler *Http2Assembler, tcpID *api.TcpID, superTi
 			streamID,
 			"HTTP2",
 		)
-		item = reqResMatcher.registerResponse(ident, &messageHTTP1, superTimer.CaptureTime, messageHTTP1.ProtoMinor)
+		item = reqResMatcher.registerResponse(ident, &messageHTTP1, captureTime, progress.Current(), messageHTTP1.ProtoMinor)
 		if item != nil {
 			item.ConnectionInfo = &api.ConnectionInfo{
 				ClientIP:   tcpID.DstIP,
@@ -104,18 +101,22 @@ func handleHTTP2Stream(http2Assembler *Http2Assembler, tcpID *api.TcpID, superTi
 		} else {
 			item.Protocol = http2Protocol
 		}
+		item.Capture = capture
 		filterAndEmit(item, emitter, options)
 	}
 
 	return nil
 }
 
-func handleHTTP1ClientStream(b *bufio.Reader, tcpID *api.TcpID, counterPair *api.CounterPair, superTimer *api.SuperTimer, emitter api.Emitter, options *api.TrafficFilteringOptions) (switchingProtocolsHTTP2 bool, req *http.Request, err error) {
+func handleHTTP1ClientStream(b *bufio.Reader, progress *api.ReadProgress, capture api.Capture, tcpID *api.TcpID, counterPair *api.CounterPair, captureTime time.Time, emitter api.Emitter, options *api.TrafficFilteringOptions, reqResMatcher *requestResponseMatcher) (switchingProtocolsHTTP2 bool, req *http.Request, err error) {
 	req, err = http.ReadRequest(b)
 	if err != nil {
 		return
 	}
+	counterPair.Lock()
 	counterPair.Request++
+	requestCounter := counterPair.Request
+	counterPair.Unlock()
 
 	// Check HTTP2 upgrade - HTTP2 Over Cleartext (H2C)
 	if strings.Contains(strings.ToLower(req.Header.Get("Connection")), "upgrade") && strings.ToLower(req.Header.Get("Upgrade")) == "h2c" {
@@ -127,15 +128,15 @@ func handleHTTP1ClientStream(b *bufio.Reader, tcpID *api.TcpID, counterPair *api
 	req.Body = io.NopCloser(bytes.NewBuffer(body)) // rewind
 
 	ident := fmt.Sprintf(
-		"%s->%s %s->%s %d %s",
+		"%s_%s_%s_%s_%d_%s",
 		tcpID.SrcIP,
 		tcpID.DstIP,
 		tcpID.SrcPort,
 		tcpID.DstPort,
-		counterPair.Request,
+		requestCounter,
 		"HTTP1",
 	)
-	item := reqResMatcher.registerRequest(ident, req, superTimer.CaptureTime, req.ProtoMinor)
+	item := reqResMatcher.registerRequest(ident, req, captureTime, progress.Current(), req.ProtoMinor)
 	if item != nil {
 		item.ConnectionInfo = &api.ConnectionInfo{
 			ClientIP:   tcpID.SrcIP,
@@ -144,18 +145,22 @@ func handleHTTP1ClientStream(b *bufio.Reader, tcpID *api.TcpID, counterPair *api
 			ServerPort: tcpID.DstPort,
 			IsOutgoing: true,
 		}
+		item.Capture = capture
 		filterAndEmit(item, emitter, options)
 	}
 	return
 }
 
-func handleHTTP1ServerStream(b *bufio.Reader, tcpID *api.TcpID, counterPair *api.CounterPair, superTimer *api.SuperTimer, emitter api.Emitter, options *api.TrafficFilteringOptions) (switchingProtocolsHTTP2 bool, err error) {
+func handleHTTP1ServerStream(b *bufio.Reader, progress *api.ReadProgress, capture api.Capture, tcpID *api.TcpID, counterPair *api.CounterPair, captureTime time.Time, emitter api.Emitter, options *api.TrafficFilteringOptions, reqResMatcher *requestResponseMatcher) (switchingProtocolsHTTP2 bool, err error) {
 	var res *http.Response
 	res, err = http.ReadResponse(b, nil)
 	if err != nil {
 		return
 	}
+	counterPair.Lock()
 	counterPair.Response++
+	responseCounter := counterPair.Response
+	counterPair.Unlock()
 
 	// Check HTTP2 upgrade - HTTP2 Over Cleartext (H2C)
 	if res.StatusCode == 101 && strings.Contains(strings.ToLower(res.Header.Get("Connection")), "upgrade") && strings.ToLower(res.Header.Get("Upgrade")) == "h2c" {
@@ -167,15 +172,15 @@ func handleHTTP1ServerStream(b *bufio.Reader, tcpID *api.TcpID, counterPair *api
 	res.Body = io.NopCloser(bytes.NewBuffer(body)) // rewind
 
 	ident := fmt.Sprintf(
-		"%s->%s %s->%s %d %s",
+		"%s_%s_%s_%s_%d_%s",
 		tcpID.DstIP,
 		tcpID.SrcIP,
 		tcpID.DstPort,
 		tcpID.SrcPort,
-		counterPair.Response,
+		responseCounter,
 		"HTTP1",
 	)
-	item := reqResMatcher.registerResponse(ident, res, superTimer.CaptureTime, res.ProtoMinor)
+	item := reqResMatcher.registerResponse(ident, res, captureTime, progress.Current(), res.ProtoMinor)
 	if item != nil {
 		item.ConnectionInfo = &api.ConnectionInfo{
 			ClientIP:   tcpID.DstIP,
@@ -184,6 +189,7 @@ func handleHTTP1ServerStream(b *bufio.Reader, tcpID *api.TcpID, counterPair *api
 			ServerPort: tcpID.SrcPort,
 			IsOutgoing: false,
 		}
+		item.Capture = capture
 		filterAndEmit(item, emitter, options)
 	}
 	return

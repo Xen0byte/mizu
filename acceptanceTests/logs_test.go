@@ -11,22 +11,22 @@ func TestLogs(t *testing.T) {
 		t.Skip("ignored acceptance test")
 	}
 
-	cliPath, cliPathErr := getCliPath()
+	cliPath, cliPathErr := GetCliPath()
 	if cliPathErr != nil {
 		t.Errorf("failed to get cli path, err: %v", cliPathErr)
 		return
 	}
 
-	tapCmdArgs := getDefaultTapCommandArgs()
+	tapCmdArgs := GetDefaultTapCommandArgs()
 
-	tapNamespace := getDefaultTapNamespace()
+	tapNamespace := GetDefaultTapNamespace()
 	tapCmdArgs = append(tapCmdArgs, tapNamespace...)
 
 	tapCmd := exec.Command(cliPath, tapCmdArgs...)
 	t.Logf("running command: %v", tapCmd.String())
 
 	t.Cleanup(func() {
-		if err := cleanupCommand(tapCmd); err != nil {
+		if err := CleanupCommand(tapCmd); err != nil {
 			t.Logf("failed to cleanup tap command, err: %v", err)
 		}
 	})
@@ -36,14 +36,14 @@ func TestLogs(t *testing.T) {
 		return
 	}
 
-	apiServerUrl := getApiServerUrl(defaultApiServerPort)
+	apiServerUrl := GetApiServerUrl(DefaultApiServerPort)
 
-	if err := waitTapPodsReady(apiServerUrl); err != nil {
+	if err := WaitTapPodsReady(apiServerUrl); err != nil {
 		t.Errorf("failed to start tap pods on time, err: %v", err)
 		return
 	}
 
-	logsCmdArgs := getDefaultLogsCommandArgs()
+	logsCmdArgs := GetDefaultLogsCommandArgs()
 
 	logsCmd := exec.Command(cliPath, logsCmdArgs...)
 	t.Logf("running command: %v", logsCmd.String())
@@ -58,7 +58,7 @@ func TestLogs(t *testing.T) {
 		return
 	}
 
-	logsPath, logsPathErr := getLogsPath()
+	logsPath, logsPathErr := GetLogsPath()
 	if logsPathErr != nil {
 		t.Errorf("failed to get logs path, err: %v", logsPathErr)
 		return
@@ -81,27 +81,27 @@ func TestLogs(t *testing.T) {
 		logsFileNames = append(logsFileNames, file.Name)
 	}
 
-	if !Contains(logsFileNames, "mizu.mizu-api-server.mizu-api-server.log") {
+	if !Contains(logsFileNames, "kubeshark.kubeshark-api-server.kubeshark-api-server.log") {
 		t.Errorf("api server logs not found")
 		return
 	}
 
-	if !Contains(logsFileNames, "mizu.mizu-api-server.basenine.log") {
+	if !Contains(logsFileNames, "kubeshark.kubeshark-api-server.basenine.log") {
 		t.Errorf("basenine logs not found")
 		return
 	}
 
-	if !Contains(logsFileNames, "mizu_cli.log") {
+	if !Contains(logsFileNames, "kubeshark_cli.log") {
 		t.Errorf("cli logs not found")
 		return
 	}
 
-	if !Contains(logsFileNames, "mizu_events.log") {
+	if !Contains(logsFileNames, "kubeshark_events.log") {
 		t.Errorf("events logs not found")
 		return
 	}
 
-	if !ContainsPartOfValue(logsFileNames, "mizu.mizu-tapper-daemon-set") {
+	if !ContainsPartOfValue(logsFileNames, "kubeshark.kubeshark-tapper-daemon-set") {
 		t.Errorf("tapper logs not found")
 		return
 	}
@@ -112,22 +112,22 @@ func TestLogsPath(t *testing.T) {
 		t.Skip("ignored acceptance test")
 	}
 
-	cliPath, cliPathErr := getCliPath()
+	cliPath, cliPathErr := GetCliPath()
 	if cliPathErr != nil {
 		t.Errorf("failed to get cli path, err: %v", cliPathErr)
 		return
 	}
 
-	tapCmdArgs := getDefaultTapCommandArgs()
+	tapCmdArgs := GetDefaultTapCommandArgs()
 
-	tapNamespace := getDefaultTapNamespace()
+	tapNamespace := GetDefaultTapNamespace()
 	tapCmdArgs = append(tapCmdArgs, tapNamespace...)
 
 	tapCmd := exec.Command(cliPath, tapCmdArgs...)
 	t.Logf("running command: %v", tapCmd.String())
 
 	t.Cleanup(func() {
-		if err := cleanupCommand(tapCmd); err != nil {
+		if err := CleanupCommand(tapCmd); err != nil {
 			t.Logf("failed to cleanup tap command, err: %v", err)
 		}
 	})
@@ -137,14 +137,14 @@ func TestLogsPath(t *testing.T) {
 		return
 	}
 
-	apiServerUrl := getApiServerUrl(defaultApiServerPort)
+	apiServerUrl := GetApiServerUrl(DefaultApiServerPort)
 
-	if err := waitTapPodsReady(apiServerUrl); err != nil {
+	if err := WaitTapPodsReady(apiServerUrl); err != nil {
 		t.Errorf("failed to start tap pods on time, err: %v", err)
 		return
 	}
 
-	logsCmdArgs := getDefaultLogsCommandArgs()
+	logsCmdArgs := GetDefaultLogsCommandArgs()
 
 	logsPath := "../logs.zip"
 	logsCmdArgs = append(logsCmdArgs, "-f", logsPath)
@@ -179,27 +179,27 @@ func TestLogsPath(t *testing.T) {
 		logsFileNames = append(logsFileNames, file.Name)
 	}
 
-	if !Contains(logsFileNames, "mizu.mizu-api-server.mizu-api-server.log") {
+	if !Contains(logsFileNames, "kubeshark.kubeshark-api-server.kubeshark-api-server.log") {
 		t.Errorf("api server logs not found")
 		return
 	}
 
-	if !Contains(logsFileNames, "mizu.mizu-api-server.basenine.log") {
+	if !Contains(logsFileNames, "kubeshark.kubeshark-api-server.basenine.log") {
 		t.Errorf("basenine logs not found")
 		return
 	}
 
-	if !Contains(logsFileNames, "mizu_cli.log") {
+	if !Contains(logsFileNames, "kubeshark_cli.log") {
 		t.Errorf("cli logs not found")
 		return
 	}
 
-	if !Contains(logsFileNames, "mizu_events.log") {
+	if !Contains(logsFileNames, "kubeshark_events.log") {
 		t.Errorf("events logs not found")
 		return
 	}
 
-	if !ContainsPartOfValue(logsFileNames, "mizu.mizu-tapper-daemon-set") {
+	if !ContainsPartOfValue(logsFileNames, "kubeshark.kubeshark-tapper-daemon-set") {
 		t.Errorf("tapper logs not found")
 		return
 	}

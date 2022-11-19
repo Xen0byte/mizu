@@ -3,9 +3,10 @@ package servicemap
 import (
 	"sync"
 
-	"github.com/up9inc/mizu/shared"
-	"github.com/up9inc/mizu/shared/logger"
-	tapApi "github.com/up9inc/mizu/tap/api"
+	"github.com/jinzhu/copier"
+
+	"github.com/kubeshark/kubeshark/logger"
+	tapApi "github.com/kubeshark/kubeshark/tap/api"
 )
 
 const (
@@ -14,27 +15,31 @@ const (
 	UnresolvedNodeName = "unresolved"
 )
 
-var instance *serviceMap
+var instance *defaultServiceMap
 var once sync.Once
 
-func GetInstance() ServiceMap {
+func GetDefaultServiceMapInstance() *defaultServiceMap {
 	once.Do(func() {
-		instance = newServiceMap()
+		instance = NewDefaultServiceMapGenerator()
 		logger.Log.Debug("Service Map Initialized")
 	})
 	return instance
 }
 
-type serviceMap struct {
-	config           *shared.MizuAgentConfig
+type defaultServiceMap struct {
+	enabled          bool
 	graph            *graph
 	entriesProcessed int
 }
 
-type ServiceMap interface {
-	SetConfig(config *shared.MizuAgentConfig)
-	IsEnabled() bool
+type ServiceMapSink interface {
 	NewTCPEntry(source *tapApi.TCP, destination *tapApi.TCP, protocol *tapApi.Protocol)
+}
+
+type ServiceMap interface {
+	Enable()
+	Disable()
+	IsEnabled() bool
 	GetStatus() ServiceMapStatus
 	GetNodes() []ServiceMapNode
 	GetEdges() []ServiceMapEdge
@@ -44,9 +49,9 @@ type ServiceMap interface {
 	Reset()
 }
 
-func newServiceMap() *serviceMap {
-	return &serviceMap{
-		config:           nil,
+func NewDefaultServiceMapGenerator() *defaultServiceMap {
+	return &defaultServiceMap{
+		enabled:          false,
 		entriesProcessed: 0,
 		graph:            newDirectedGraph(),
 	}
@@ -105,12 +110,12 @@ func newEdgeData(p *tapApi.Protocol) *edgeData {
 	}
 }
 
-func (s *serviceMap) nodeExists(k key) (*nodeData, bool) {
+func (s *defaultServiceMap) nodeExists(k key) (*nodeData, bool) {
 	n, ok := s.graph.Nodes[k]
 	return n, ok
 }
 
-func (s *serviceMap) addNode(k key, e *tapApi.TCP) (*nodeData, bool) {
+func (s *defaultServiceMap) addNode(k key, e *tapApi.TCP) (*nodeData, bool) {
 	nd, exists := s.nodeExists(k)
 	if !exists {
 		s.graph.Nodes[k] = newNodeData(len(s.graph.Nodes)+1, e)
@@ -119,7 +124,7 @@ func (s *serviceMap) addNode(k key, e *tapApi.TCP) (*nodeData, bool) {
 	return nd, false
 }
 
-func (s *serviceMap) addEdge(u, v *entryData, p *tapApi.Protocol) {
+func (s *defaultServiceMap) addEdge(u, v *entryData, p *tapApi.Protocol) {
 	if n, ok := s.addNode(u.key, u.entry); !ok {
 		n.count++
 	}
@@ -156,42 +161,65 @@ func (s *serviceMap) addEdge(u, v *entryData, p *tapApi.Protocol) {
 	s.entriesProcessed++
 }
 
-func (s *serviceMap) SetConfig(config *shared.MizuAgentConfig) {
-	s.config = config
+func (s *defaultServiceMap) Enable() {
+	s.enabled = true
 }
 
-func (s *serviceMap) IsEnabled() bool {
-	if s.config != nil && s.config.ServiceMap {
-		return true
-	}
-	return false
+func (s *defaultServiceMap) Disable() {
+	s.Reset()
+	s.enabled = false
 }
 
-func (s *serviceMap) NewTCPEntry(src *tapApi.TCP, dst *tapApi.TCP, p *tapApi.Protocol) {
+func (s *defaultServiceMap) IsEnabled() bool {
+	return s.enabled
+}
+
+func (s *defaultServiceMap) NewTCPEntry(src *tapApi.TCP, dst *tapApi.TCP, p *tapApi.Protocol) {
 	if !s.IsEnabled() {
 		return
 	}
 
-	srcEntry := &entryData{
-		key:   key(src.IP),
-		entry: src,
-	}
-	if len(srcEntry.entry.Name) == 0 {
+	var srcEntry *entryData
+	var dstEntry *entryData
+
+	if len(src.Name) == 0 {
+		srcEntry = &entryData{
+			key:   key(src.IP),
+			entry: &tapApi.TCP{},
+		}
+		if err := copier.Copy(srcEntry.entry, src); err != nil {
+			logger.Log.Errorf("Error while copying src entry into src entry data")
+		}
+
 		srcEntry.entry.Name = UnresolvedNodeName
+	} else {
+		srcEntry = &entryData{
+			key:   key(src.Name),
+			entry: src,
+		}
 	}
 
-	dstEntry := &entryData{
-		key:   key(dst.IP),
-		entry: dst,
-	}
-	if len(dstEntry.entry.Name) == 0 {
+	if len(dst.Name) == 0 {
+		dstEntry = &entryData{
+			key:   key(dst.IP),
+			entry: &tapApi.TCP{},
+		}
+		if err := copier.Copy(dstEntry.entry, dst); err != nil {
+			logger.Log.Errorf("Error while copying dst entry into dst entry data")
+		}
+
 		dstEntry.entry.Name = UnresolvedNodeName
+	} else {
+		dstEntry = &entryData{
+			key:   key(dst.Name),
+			entry: dst,
+		}
 	}
 
 	s.addEdge(srcEntry, dstEntry, p)
 }
 
-func (s *serviceMap) GetStatus() ServiceMapStatus {
+func (s *defaultServiceMap) GetStatus() ServiceMapStatus {
 	status := ServiceMapDisabled
 	if s.IsEnabled() {
 		status = ServiceMapEnabled
@@ -205,36 +233,42 @@ func (s *serviceMap) GetStatus() ServiceMapStatus {
 	}
 }
 
-func (s *serviceMap) GetNodes() []ServiceMapNode {
-	var nodes []ServiceMapNode
+func (s *defaultServiceMap) GetNodes() []ServiceMapNode {
+	nodes := []ServiceMapNode{}
+
 	for i, n := range s.graph.Nodes {
 		nodes = append(nodes, ServiceMapNode{
-			Id:    n.id,
-			Name:  string(i),
-			Entry: n.entry,
-			Count: n.count,
+			Id:       n.id,
+			Name:     string(i),
+			Resolved: n.entry.Name != UnresolvedNodeName,
+			Entry:    n.entry,
+			Count:    n.count,
 		})
 	}
+
 	return nodes
 }
 
-func (s *serviceMap) GetEdges() []ServiceMapEdge {
-	var edges []ServiceMapEdge
+func (s *defaultServiceMap) GetEdges() []ServiceMapEdge {
+	edges := []ServiceMapEdge{}
+
 	for u, m := range s.graph.Edges {
 		for v := range m {
 			for _, p := range s.graph.Edges[u][v].data {
 				edges = append(edges, ServiceMapEdge{
 					Source: ServiceMapNode{
-						Id:    s.graph.Nodes[u].id,
-						Name:  string(u),
-						Entry: s.graph.Nodes[u].entry,
-						Count: s.graph.Nodes[u].count,
+						Id:       s.graph.Nodes[u].id,
+						Name:     string(u),
+						Entry:    s.graph.Nodes[u].entry,
+						Resolved: s.graph.Nodes[u].entry.Name != UnresolvedNodeName,
+						Count:    s.graph.Nodes[u].count,
 					},
 					Destination: ServiceMapNode{
-						Id:    s.graph.Nodes[v].id,
-						Name:  string(v),
-						Entry: s.graph.Nodes[v].entry,
-						Count: s.graph.Nodes[v].count,
+						Id:       s.graph.Nodes[v].id,
+						Name:     string(v),
+						Entry:    s.graph.Nodes[v].entry,
+						Resolved: s.graph.Nodes[v].entry.Name != UnresolvedNodeName,
+						Count:    s.graph.Nodes[v].count,
 					},
 					Count:    p.count,
 					Protocol: p.protocol,
@@ -242,18 +276,19 @@ func (s *serviceMap) GetEdges() []ServiceMapEdge {
 			}
 		}
 	}
+
 	return edges
 }
 
-func (s *serviceMap) GetEntriesProcessedCount() int {
+func (s *defaultServiceMap) GetEntriesProcessedCount() int {
 	return s.entriesProcessed
 }
 
-func (s *serviceMap) GetNodesCount() int {
+func (s *defaultServiceMap) GetNodesCount() int {
 	return len(s.graph.Nodes)
 }
 
-func (s *serviceMap) GetEdgesCount() int {
+func (s *defaultServiceMap) GetEdgesCount() int {
 	var count int
 	for u, m := range s.graph.Edges {
 		for v := range m {
@@ -265,7 +300,7 @@ func (s *serviceMap) GetEdgesCount() int {
 	return count
 }
 
-func (s *serviceMap) Reset() {
+func (s *defaultServiceMap) Reset() {
 	s.entriesProcessed = 0
 	s.graph = newDirectedGraph()
 }

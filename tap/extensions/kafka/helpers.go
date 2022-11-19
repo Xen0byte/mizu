@@ -4,13 +4,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
+
 	"github.com/fatih/camelcase"
+	"github.com/kubeshark/kubeshark/tap/api"
 	"github.com/ohler55/ojg/jp"
 	"github.com/ohler55/ojg/oj"
-	"github.com/up9inc/mizu/tap/api"
 )
 
 type KafkaPayload struct {
@@ -34,8 +38,13 @@ type KafkaWrapper struct {
 func representRequestHeader(data map[string]interface{}, rep []interface{}) []interface{} {
 	requestHeader, _ := json.Marshal([]api.TableData{
 		{
+			Name:     "ApiKeyName",
+			Value:    data["apiKeyName"].(string),
+			Selector: `request.apiKeyName`,
+		},
+		{
 			Name:     "ApiKey",
-			Value:    apiNames[int(data["apiKey"].(float64))],
+			Value:    int(data["apiKey"].(float64)),
 			Selector: `request.apiKey`,
 		},
 		{
@@ -368,24 +377,26 @@ func representProduceRequest(data map[string]interface{}) []interface{} {
 			}
 			recordsResults := recordsPath.Get(obj)
 			if len(recordsResults) > 0 {
-				records := recordsResults[0].([]interface{})
-				for i, _record := range records {
-					record := _record.(map[string]interface{})
-					value := record["value"]
-					delete(record, "value")
+				if recordsResults[0] != nil {
+					records := recordsResults[0].([]interface{})
+					for i, _record := range records {
+						record := _record.(map[string]interface{})
+						value := record["value"]
+						delete(record, "value")
 
-					rep = append(rep, api.SectionData{
-						Type:  api.TABLE,
-						Title: fmt.Sprintf("Record [%d] Details (topic: %s)", i, topicName),
-						Data:  representMapAsTable(record, fmt.Sprintf(`request.payload.topicData.partitions.partitionData.records.recordBatch.record[%d]`, i), []string{"value"}),
-					})
+						rep = append(rep, api.SectionData{
+							Type:  api.TABLE,
+							Title: fmt.Sprintf("Record [%d] Details (topic: %s)", i, topicName),
+							Data:  representMapAsTable(record, fmt.Sprintf(`request.payload.topicData.partitions.partitionData.records.recordBatch.record[%d]`, i), []string{"value"}),
+						})
 
-					rep = append(rep, api.SectionData{
-						Type:     api.BODY,
-						Title:    fmt.Sprintf("Record [%d] Value", i),
-						Data:     value.(string),
-						Selector: fmt.Sprintf(`request.payload.topicData.partitions.partitionData.records.recordBatch.record[%d].value`, i),
-					})
+						rep = append(rep, api.SectionData{
+							Type:     api.BODY,
+							Title:    fmt.Sprintf("Record [%d] Value", i),
+							Data:     value.(string),
+							Selector: fmt.Sprintf(`request.payload.topicData.partitions.partitionData.records.recordBatch.record[%d].value`, i),
+						})
+					}
 				}
 			}
 		}
@@ -614,22 +625,24 @@ func representFetchResponse(data map[string]interface{}) []interface{} {
 					Data:  representMapAsTable(recordBatch, fmt.Sprintf(`response.payload.responses[%d].partitionResponses[%d].recordSet.recordBatch`, i, j), []string{"record"}),
 				})
 
-				for k, _record := range recordBatch["record"].([]interface{}) {
-					record := _record.(map[string]interface{})
-					value := record["value"]
+				if recordBatch["record"] != nil {
+					for k, _record := range recordBatch["record"].([]interface{}) {
+						record := _record.(map[string]interface{})
+						value := record["value"]
 
-					rep = append(rep, api.SectionData{
-						Type:  api.TABLE,
-						Title: fmt.Sprintf("Response [%d] Partition Response [%d] Record [%d] (topic: %s)", i, j, k, topicName),
-						Data:  representMapAsTable(record, fmt.Sprintf(`response.payload.responses[%d].partitionResponses[%d].recordSet.recordBatch.record[%d]`, i, j, k), []string{"value"}),
-					})
+						rep = append(rep, api.SectionData{
+							Type:  api.TABLE,
+							Title: fmt.Sprintf("Response [%d] Partition Response [%d] Record [%d] (topic: %s)", i, j, k, topicName),
+							Data:  representMapAsTable(record, fmt.Sprintf(`response.payload.responses[%d].partitionResponses[%d].recordSet.recordBatch.record[%d]`, i, j, k), []string{"value"}),
+						})
 
-					rep = append(rep, api.SectionData{
-						Type:     api.BODY,
-						Title:    fmt.Sprintf("Response [%d] Partition Response [%d] Record [%d] Value (topic: %s)", i, j, k, topicName),
-						Data:     value.(string),
-						Selector: fmt.Sprintf(`response.payload.responses[%d].partitionResponses[%d].recordSet.recordBatch.record[%d].value`, i, j, k),
-					})
+						rep = append(rep, api.SectionData{
+							Type:     api.BODY,
+							Title:    fmt.Sprintf("Response [%d] Partition Response [%d] Record [%d] Value (topic: %s)", i, j, k, topicName),
+							Data:     value.(string),
+							Selector: fmt.Sprintf(`response.payload.responses[%d].partitionResponses[%d].recordSet.recordBatch.record[%d].value`, i, j, k),
+						})
+					}
 				}
 			}
 		}
@@ -730,6 +743,9 @@ func representCreateTopicsRequest(data map[string]interface{}) []interface{} {
 		Data:  string(repPayload),
 	})
 
+	if payload["topics"] == nil {
+		return rep
+	}
 	for i, _topic := range payload["topics"].([]interface{}) {
 		topic := _topic.(map[string]interface{})
 
@@ -766,6 +782,9 @@ func representCreateTopicsResponse(data map[string]interface{}) []interface{} {
 		Data:  string(repPayload),
 	})
 
+	if payload["topics"] == nil {
+		return rep
+	}
 	for i, _topic := range payload["topics"].([]interface{}) {
 		topic := _topic.(map[string]interface{})
 
@@ -798,12 +817,12 @@ func representDeleteTopicsRequest(data map[string]interface{}) []interface{} {
 	repPayload, _ := json.Marshal([]api.TableData{
 		{
 			Name:     "TopicNames",
-			Value:    string(topicNames),
+			Value:    topicNames,
 			Selector: `request.payload.topicNames`,
 		},
 		{
 			Name:     "Topics",
-			Value:    string(topics),
+			Value:    topics,
 			Selector: `request.payload.topics`,
 		},
 		{
@@ -880,12 +899,17 @@ func representMapAsTable(mapData map[string]interface{}, selectorPrefix string, 
 			}
 		}
 		selector := fmt.Sprintf("%s[\"%s\"]", selectorPrefix, key)
+		caser := cases.Title(language.Und, cases.NoLower)
 		table = append(table, api.TableData{
-			Name:     strings.Join(camelcase.Split(strings.Title(key)), " "),
+			Name:     strings.Join(camelcase.Split(caser.String(key)), " "),
 			Value:    value,
 			Selector: selector,
 		})
 	}
+
+	sort.Slice(table, func(i, j int) bool {
+		return table[i].Name < table[j].Name
+	})
 
 	obj, _ := json.Marshal(table)
 	representation = string(obj)

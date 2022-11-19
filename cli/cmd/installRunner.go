@@ -1,83 +1,33 @@
 package cmd
 
 import (
-	"context"
-	"errors"
 	"fmt"
+	"strings"
 
-	"github.com/creasty/defaults"
-	"github.com/up9inc/mizu/cli/config"
-	"github.com/up9inc/mizu/cli/errormessage"
-	"github.com/up9inc/mizu/cli/resources"
-	"github.com/up9inc/mizu/cli/uiUtils"
-	"github.com/up9inc/mizu/shared"
-	"github.com/up9inc/mizu/shared/logger"
-	k8serrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"github.com/kubeshark/kubeshark/cli/bucket"
+	"github.com/kubeshark/kubeshark/cli/config"
+	"github.com/kubeshark/kubeshark/logger"
 )
 
-func runMizuInstall() {
-	kubernetesProvider, err := getKubernetesProviderForCli()
-	if err != nil {
-		return
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel() // cancel will be called when this function exits
-
-	var serializedValidationRules string
-	var serializedContract string
-
-	var defaultMaxEntriesDBSizeBytes int64 = 200 * 1000 * 1000
-
-	defaultResources := shared.Resources{}
-	if err := defaults.Set(&defaultResources); err != nil {
-		logger.Log.Debug(err)
-	}
-
-	mizuAgentConfig := getInstallMizuAgentConfig(defaultMaxEntriesDBSizeBytes, defaultResources)
-	serializedMizuConfig, err := getSerializedMizuAgentConfig(mizuAgentConfig)
-	if err != nil {
-		logger.Log.Errorf(uiUtils.Error, fmt.Sprintf("Error serializing mizu config: %v", errormessage.FormatError(err)))
-		return
-	}
-
-	if err = resources.CreateInstallMizuResources(ctx, kubernetesProvider, serializedValidationRules,
-		serializedContract, serializedMizuConfig, config.Config.IsNsRestrictedMode(),
-		config.Config.MizuResourcesNamespace, config.Config.AgentImage,
-		config.Config.KratosImage, config.Config.KetoImage,
-		nil, defaultMaxEntriesDBSizeBytes, defaultResources, config.Config.ImagePullPolicy(),
-		config.Config.LogLevel(), false); err != nil {
-		var statusError *k8serrors.StatusError
-		if errors.As(err, &statusError) {
-			if statusError.ErrStatus.Reason == metav1.StatusReasonAlreadyExists {
-				logger.Log.Info("Mizu is already running in this namespace, run `mizu clean` to remove the currently running Mizu instance")
-			}
-		} else {
-			defer resources.CleanUpMizuResources(ctx, cancel, kubernetesProvider, config.Config.IsNsRestrictedMode(), config.Config.MizuResourcesNamespace)
-			logger.Log.Errorf(uiUtils.Error, fmt.Sprintf("Error creating resources: %v", errormessage.FormatError(err)))
+func runKubesharkInstall() {
+	// TODO: Remove this function
+	if config.Config.Install.Out {
+		bucketProvider := bucket.NewProvider(config.Config.Install.TemplateUrl, bucket.DefaultTimeout)
+		installTemplate, err := bucketProvider.GetInstallTemplate(config.Config.Install.TemplateName)
+		if err != nil {
+			logger.Log.Errorf("Failed getting install template, err: %v", err)
+			return
 		}
 
+		fmt.Print(installTemplate)
 		return
 	}
 
-	logger.Log.Infof(uiUtils.Magenta, "Installation completed, run `mizu view` to connect to the mizu daemon instance")
-}
+	var sb strings.Builder
+	sb.WriteString("Hello! This command can be used to install Kubeshark Pro edition on your Kubernetes cluster.")
+	sb.WriteString("\nPlease run:")
+	sb.WriteString("\n\tkubeshark install -o | kubectl apply -n kubeshark -f -")
+	sb.WriteString("\n\nor use helm chart as described in https://getkubeshark.io/docs/installing-kubeshark/centralized-installation\n")
 
-func getInstallMizuAgentConfig(maxDBSizeBytes int64, tapperResources shared.Resources) *shared.MizuAgentConfig {
-	mizuAgentConfig := shared.MizuAgentConfig{
-		MaxDBSizeBytes:         maxDBSizeBytes,
-		AgentImage:             config.Config.AgentImage,
-		PullPolicy:             config.Config.ImagePullPolicyStr,
-		LogLevel:               config.Config.LogLevel(),
-		TapperResources:        tapperResources,
-		MizuResourcesNamespace: config.Config.MizuResourcesNamespace,
-		AgentDatabasePath:      shared.DataDirPath,
-		StandaloneMode:         true,
-		ServiceMap:             config.Config.ServiceMap,
-		OAS:                    config.Config.OAS,
-		Elastic:                config.Config.Elastic,
-	}
-
-	return &mizuAgentConfig
+	fmt.Print(sb.String())
 }

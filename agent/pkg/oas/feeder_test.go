@@ -4,37 +4,52 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/ioutil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
 
-	"github.com/up9inc/mizu/agent/pkg/har"
+	"github.com/kubeshark/kubeshark/agent/pkg/har"
 
-	"github.com/up9inc/mizu/shared/logger"
+	"github.com/kubeshark/kubeshark/logger"
 )
 
 func getFiles(baseDir string) (result []string, err error) {
 	result = make([]string, 0)
 	logger.Log.Infof("Reading files from tree: %s", baseDir)
 
+	inputs := []string{baseDir}
+
 	// https://yourbasic.org/golang/list-files-in-directory/
-	err = filepath.Walk(baseDir,
-		func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
+	visitor := func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
 
-			ext := strings.ToLower(filepath.Ext(path))
-			if !info.IsDir() && (ext == ".har" || ext == ".ldjson") {
-				result = append(result, path)
-			}
-
+		if info.Mode()&os.ModeSymlink != 0 {
+			path, _ = os.Readlink(path)
+			inputs = append(inputs, path)
 			return nil
-		})
+		}
+
+		ext := strings.ToLower(filepath.Ext(path))
+		if !info.IsDir() && (ext == ".har" || ext == ".ldjson") {
+			result = append(result, path)
+		}
+
+		return nil
+	}
+
+	for len(inputs) > 0 {
+		path := inputs[0]
+		inputs = inputs[1:]
+		err = filepath.Walk(path, visitor)
+	}
 
 	sort.SliceStable(result, func(i, j int) bool {
 		return fileSize(result[i]) < fileSize(result[j])
@@ -53,23 +68,23 @@ func fileSize(fname string) int64 {
 	return fi.Size()
 }
 
-func feedEntries(fromFiles []string, isSync bool) (count int, err error) {
+func feedEntries(fromFiles []string, isSync bool, gen *defaultOasGenerator) (count uint, err error) {
 	badFiles := make([]string, 0)
-	cnt := 0
+	cnt := uint(0)
 	for _, file := range fromFiles {
 		logger.Log.Info("Processing file: " + file)
 		ext := strings.ToLower(filepath.Ext(file))
-		eCnt := 0
+		eCnt := uint(0)
 		switch ext {
 		case ".har":
-			eCnt, err = feedFromHAR(file, isSync)
+			eCnt, err = feedFromHAR(file, isSync, gen)
 			if err != nil {
 				logger.Log.Warning("Failed processing file: " + err.Error())
 				badFiles = append(badFiles, file)
 				continue
 			}
 		case ".ldjson":
-			eCnt, err = feedFromLDJSON(file, isSync)
+			eCnt, err = feedFromLDJSON(file, isSync, gen)
 			if err != nil {
 				logger.Log.Warning("Failed processing file: " + err.Error())
 				badFiles = append(badFiles, file)
@@ -88,7 +103,7 @@ func feedEntries(fromFiles []string, isSync bool) (count int, err error) {
 	return cnt, nil
 }
 
-func feedFromHAR(file string, isSync bool) (int, error) {
+func feedFromHAR(file string, isSync bool, gen *defaultOasGenerator) (uint, error) {
 	fd, err := os.Open(file)
 	if err != nil {
 		panic(err)
@@ -107,32 +122,35 @@ func feedFromHAR(file string, isSync bool) (int, error) {
 		return 0, err
 	}
 
-	cnt := 0
+	cnt := uint(0)
 	for _, entry := range harDoc.Log.Entries {
 		cnt += 1
-		feedEntry(&entry, isSync)
+		feedEntry(&entry, "", file, gen, fmt.Sprintf("%024d", cnt))
 	}
 
 	return cnt, nil
 }
 
-func feedEntry(entry *har.Entry, isSync bool) {
+func feedEntry(entry *har.Entry, source string, file string, gen *defaultOasGenerator, cnt string) {
+	entry.Comment = file
 	if entry.Response.Status == 302 {
 		logger.Log.Debugf("Dropped traffic entry due to permanent redirect status: %s", entry.StartedDateTime)
 	}
 
-	if strings.Contains(entry.Request.URL, "taboola") {
+	if strings.Contains(entry.Request.URL, "some") { // for debugging
 		logger.Log.Debugf("Interesting: %s", entry.Request.URL)
 	}
 
-	if isSync {
-		GetOasGeneratorInstance().entriesChan <- *entry // blocking variant, right?
-	} else {
-		GetOasGeneratorInstance().PushEntry(entry)
+	u, err := url.Parse(entry.Request.URL)
+	if err != nil {
+		logger.Log.Errorf("Failed to parse entry URL: %v, err: %v", entry.Request.URL, err)
 	}
+
+	ews := EntryWithSource{Entry: *entry, Source: source, Destination: u.Host, Id: cnt}
+	gen.handleHARWithSource(&ews)
 }
 
-func feedFromLDJSON(file string, isSync bool) (int, error) {
+func feedFromLDJSON(file string, isSync bool, gen *defaultOasGenerator) (uint, error) {
 	fd, err := os.Open(file)
 	if err != nil {
 		panic(err)
@@ -144,7 +162,8 @@ func feedFromLDJSON(file string, isSync bool) (int, error) {
 
 	var meta map[string]interface{}
 	buf := strings.Builder{}
-	cnt := 0
+	cnt := uint(0)
+	source := ""
 	for {
 		substr, isPrefix, err := reader.ReadLine()
 		if err == io.EOF {
@@ -164,6 +183,9 @@ func feedFromLDJSON(file string, isSync bool) (int, error) {
 			if err != nil {
 				return 0, err
 			}
+			if s, ok := meta["_source"]; ok && s != nil {
+				source = s.(string)
+			}
 		} else {
 			var entry har.Entry
 			err := json.Unmarshal([]byte(line), &entry)
@@ -171,7 +193,7 @@ func feedFromLDJSON(file string, isSync bool) (int, error) {
 				logger.Log.Warningf("Failed decoding entry: %s", line)
 			} else {
 				cnt += 1
-				feedEntry(&entry, isSync)
+				feedEntry(&entry, source, file, gen, fmt.Sprintf("%024d", cnt))
 			}
 		}
 	}

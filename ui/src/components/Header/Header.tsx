@@ -1,20 +1,19 @@
 import React from "react";
 import {AuthPresentation} from "../AuthPresentation/AuthPresentation";
-import {AnalyzeButton} from "../AnalyzeButton/AnalyzeButton";
-import logo from '../assets/Mizu-logo.svg';
+import logo from '../assets/Kubeshark-logo.svg';
 import './Header.sass';
+import {UI} from "@up9/kubeshark-common"
 
-interface HeaderProps {
-    analyzeStatus: any
-}
-export const Header: React.FC<HeaderProps> = ({analyzeStatus}) => {
+
+export const Header: React.FC = () => {
     return <div className="header">
         <div style={{display: "flex", alignItems: "center"}}>
-            <div className="title"><img src={logo} alt="logo"/></div>
+          <img className="logo" src={logo} alt="logo"/>
+            <div className="title">Kubeshark</div>
             <div className="description">Traffic viewer for Kubernetes</div>
         </div>
         <div style={{display: "flex", alignItems: "center"}}>
-            {analyzeStatus?.isAnalyzing && <AnalyzeButton analyzeStatus={analyzeStatus}/>}
+            <UI.InformationIcon/>
             <AuthPresentation/>
         </div>
     </div>;

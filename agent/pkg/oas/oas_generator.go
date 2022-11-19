@@ -1,108 +1,142 @@
 package oas
 
 import (
-	"context"
 	"encoding/json"
 	"net/url"
 	"sync"
 
-	"github.com/up9inc/mizu/agent/pkg/har"
-	"github.com/up9inc/mizu/shared/logger"
+	"github.com/kubeshark/kubeshark/agent/pkg/har"
+	"github.com/kubeshark/kubeshark/logger"
+	"github.com/kubeshark/kubeshark/tap/api"
 )
 
 var (
 	syncOnce sync.Once
-	instance *oasGenerator
+	instance *defaultOasGenerator
 )
 
-func GetOasGeneratorInstance() *oasGenerator {
+type OasGeneratorSink interface {
+	HandleEntry(kubesharkEntry *api.Entry)
+}
+
+type OasGenerator interface {
+	Start()
+	Stop()
+	IsStarted() bool
+	GetServiceSpecs() *sync.Map
+}
+
+type defaultOasGenerator struct {
+	started       bool
+	serviceSpecs  *sync.Map
+	maxExampleLen int
+}
+
+func GetDefaultOasGeneratorInstance(maxExampleLen int) *defaultOasGenerator {
 	syncOnce.Do(func() {
-		instance = newOasGenerator()
+		instance = NewDefaultOasGenerator(maxExampleLen)
 		logger.Log.Debug("OAS Generator Initialized")
 	})
 	return instance
 }
 
-func (g *oasGenerator) Start() {
-	if g.started {
-		return
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	g.cancel = cancel
-	g.ctx = ctx
-	g.entriesChan = make(chan har.Entry, 100) // buffer up to 100 entries for OAS processing
-	g.ServiceSpecs = &sync.Map{}
+func (g *defaultOasGenerator) Start() {
 	g.started = true
-	go instance.runGeneretor()
 }
 
-func (g *oasGenerator) runGeneretor() {
-	for {
-		select {
-		case <-g.ctx.Done():
-			logger.Log.Infof("OAS Generator was canceled")
-			return
-
-		case entry, ok := <-g.entriesChan:
-			if !ok {
-				logger.Log.Infof("OAS Generator - entries channel closed")
-				break
-			}
-			u, err := url.Parse(entry.Request.URL)
-			if err != nil {
-				logger.Log.Errorf("Failed to parse entry URL: %v, err: %v", entry.Request.URL, err)
-			}
-
-			val, found := g.ServiceSpecs.Load(u.Host)
-			var gen *SpecGen
-			if !found {
-				gen = NewGen(u.Scheme + "://" + u.Host)
-				g.ServiceSpecs.Store(u.Host, gen)
-			} else {
-				gen = val.(*SpecGen)
-			}
-
-			opId, err := gen.feedEntry(entry)
-			if err != nil {
-				txt, suberr := json.Marshal(entry)
-				if suberr == nil {
-					logger.Log.Debugf("Problematic entry: %s", txt)
-				}
-
-				logger.Log.Warningf("Failed processing entry: %s", err)
-				continue
-			}
-
-			logger.Log.Debugf("Handled entry %s as opId: %s", entry.Request.URL, opId) // TODO: set opId back to entry?
-		}
-	}
-}
-
-func (g *oasGenerator) PushEntry(entry *har.Entry) {
+func (g *defaultOasGenerator) Stop() {
 	if !g.started {
 		return
 	}
-	select {
-	case g.entriesChan <- *entry:
-	default:
-		logger.Log.Warningf("OAS Generator - entry wasn't sent to channel because the channel has no buffer or there is no receiver")
+
+	g.started = false
+
+	g.reset()
+}
+
+func (g *defaultOasGenerator) IsStarted() bool {
+	return g.started
+}
+
+func (g *defaultOasGenerator) HandleEntry(kubesharkEntry *api.Entry) {
+	if !g.started {
+		return
+	}
+
+	if kubesharkEntry.Protocol.Name == "http" {
+		dest := kubesharkEntry.Destination.Name
+		if dest == "" {
+			logger.Log.Debugf("OAS: Unresolved entry %d", kubesharkEntry.Id)
+			return
+		}
+
+		entry, err := har.NewEntry(kubesharkEntry.Request, kubesharkEntry.Response, kubesharkEntry.StartTime, kubesharkEntry.ElapsedTime)
+		if err != nil {
+			logger.Log.Warningf("Failed to turn KubesharkEntry %d into HAR Entry: %s", kubesharkEntry.Id, err)
+			return
+		}
+
+		entryWSource := &EntryWithSource{
+			Entry:       *entry,
+			Source:      kubesharkEntry.Source.Name,
+			Destination: dest,
+			Id:          kubesharkEntry.Id,
+		}
+
+		g.handleHARWithSource(entryWSource)
+	} else {
+		logger.Log.Debugf("OAS: Unsupported protocol in entry %d: %s", kubesharkEntry.Id, kubesharkEntry.Protocol.Name)
 	}
 }
 
-func newOasGenerator() *oasGenerator {
-	return &oasGenerator{
-		started:      false,
-		ctx:          nil,
-		cancel:       nil,
-		ServiceSpecs: nil,
-		entriesChan:  nil,
+func (g *defaultOasGenerator) handleHARWithSource(entryWSource *EntryWithSource) {
+	entry := entryWSource.Entry
+	gen := g.getGen(entryWSource.Destination, entry.Request.URL)
+
+	opId, err := gen.feedEntry(entryWSource)
+	if err != nil {
+		txt, suberr := json.Marshal(entry)
+		if suberr == nil {
+			logger.Log.Debugf("Problematic entry: %s", txt)
+		}
+
+		logger.Log.Warningf("Failed processing entry %d: %s", entryWSource.Id, err)
+		return
 	}
+
+	logger.Log.Debugf("Handled entry %s as opId: %s", entryWSource.Id, opId) // TODO: set opId back to entry?
 }
 
-type oasGenerator struct {
-	started      bool
-	ctx          context.Context
-	cancel       context.CancelFunc
-	ServiceSpecs *sync.Map
-	entriesChan  chan har.Entry
+func (g *defaultOasGenerator) getGen(dest string, urlStr string) *SpecGen {
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		logger.Log.Errorf("Failed to parse entry URL: %v, err: %v", urlStr, err)
+	}
+
+	val, found := g.serviceSpecs.Load(dest)
+	var gen *SpecGen
+	if !found {
+		gen = NewGen(u.Scheme + "://" + dest)
+		gen.MaxExampleLen = g.maxExampleLen
+		g.serviceSpecs.Store(dest, gen)
+	} else {
+		gen = val.(*SpecGen)
+	}
+	return gen
+}
+
+func (g *defaultOasGenerator) reset() {
+	g.serviceSpecs = &sync.Map{}
+}
+
+func (g *defaultOasGenerator) GetServiceSpecs() *sync.Map {
+	return g.serviceSpecs
+}
+
+func NewDefaultOasGenerator(maxExampleLen int) *defaultOasGenerator {
+	return &defaultOasGenerator{
+		started:       false,
+		serviceSpecs:  &sync.Map{},
+		maxExampleLen: maxExampleLen,
+	}
 }

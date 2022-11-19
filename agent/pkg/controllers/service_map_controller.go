@@ -3,7 +3,8 @@ package controllers
 import (
 	"net/http"
 
-	"github.com/up9inc/mizu/agent/pkg/servicemap"
+	"github.com/kubeshark/kubeshark/agent/pkg/dependency"
+	"github.com/kubeshark/kubeshark/agent/pkg/servicemap"
 
 	"github.com/gin-gonic/gin"
 )
@@ -13,8 +14,9 @@ type ServiceMapController struct {
 }
 
 func NewServiceMapController() *ServiceMapController {
+	serviceMapGenerator := dependency.GetInstance(dependency.ServiceMapGeneratorDependency).(servicemap.ServiceMap)
 	return &ServiceMapController{
-		service: servicemap.GetInstance(),
+		service: serviceMapGenerator,
 	}
 }
 

@@ -6,11 +6,12 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/up9inc/mizu/tap/api"
+	"github.com/kubeshark/kubeshark/tap/api"
 )
 
 type Request struct {
 	Size          int32       `json:"size"`
+	ApiKeyName    string      `json:"apiKeyName"`
 	ApiKey        ApiKey      `json:"apiKey"`
 	ApiVersion    int16       `json:"apiVersion"`
 	CorrelationID int32       `json:"correlationID"`
@@ -19,7 +20,7 @@ type Request struct {
 	CaptureTime   time.Time   `json:"captureTime"`
 }
 
-func ReadRequest(r io.Reader, tcpID *api.TcpID, superTimer *api.SuperTimer) (apiKey ApiKey, apiVersion int16, err error) {
+func ReadRequest(r io.Reader, tcpID *api.TcpID, counterPair *api.CounterPair, captureTime time.Time, reqResMatcher *requestResponseMatcher) (apiKey ApiKey, apiVersion int16, err error) {
 	d := &decoder{reader: r, remain: 4}
 	size := d.readInt32()
 
@@ -28,6 +29,9 @@ func ReadRequest(r io.Reader, tcpID *api.TcpID, superTimer *api.SuperTimer) (api
 	}
 
 	if size < 8 {
+		if size == 0 {
+			return 0, 0, io.EOF
+		}
 		return 0, 0, fmt.Errorf("A Kafka request header cannot be smaller than 8 bytes")
 	}
 
@@ -42,19 +46,13 @@ func ReadRequest(r io.Reader, tcpID *api.TcpID, superTimer *api.SuperTimer) (api
 	correlationID := d.readInt32()
 	clientID := d.readString()
 
-	if i := int(apiKey); i < 0 || i >= len(apiTypes) {
+	if i := int(apiKey); i < 0 || i >= numApis {
 		err = fmt.Errorf("unsupported api key: %d", i)
 		return apiKey, apiVersion, err
 	}
 
 	if err = d.err; err != nil {
 		err = dontExpectEOF(err)
-		return apiKey, apiVersion, err
-	}
-
-	t := &apiTypes[apiKey]
-	if t == nil {
-		err = fmt.Errorf("unsupported api: %s", apiNames[apiKey])
 		return apiKey, apiVersion, err
 	}
 
@@ -205,16 +203,17 @@ func ReadRequest(r io.Reader, tcpID *api.TcpID, superTimer *api.SuperTimer) (api
 
 	request := &Request{
 		Size:          size,
+		ApiKeyName:    apiNames[apiKey],
 		ApiKey:        apiKey,
 		ApiVersion:    apiVersion,
 		CorrelationID: correlationID,
 		ClientID:      clientID,
-		CaptureTime:   superTimer.CaptureTime,
+		CaptureTime:   captureTime,
 		Payload:       payload,
 	}
 
 	key := fmt.Sprintf(
-		"%s:%s->%s:%s::%d",
+		"%s_%s_%s_%s_%d",
 		tcpID.SrcIP,
 		tcpID.SrcPort,
 		tcpID.DstIP,
@@ -226,62 +225,4 @@ func ReadRequest(r io.Reader, tcpID *api.TcpID, superTimer *api.SuperTimer) (api
 	d.discardAll()
 
 	return apiKey, apiVersion, nil
-}
-
-func WriteRequest(w io.Writer, apiVersion int16, correlationID int32, clientID string, msg Message) error {
-	apiKey := msg.ApiKey()
-
-	if i := int(apiKey); i < 0 || i >= len(apiTypes) {
-		return fmt.Errorf("unsupported api key: %d", i)
-	}
-
-	t := &apiTypes[apiKey]
-	if t == nil {
-		return fmt.Errorf("unsupported api: %s", apiNames[apiKey])
-	}
-
-	minVersion := t.minVersion()
-	maxVersion := t.maxVersion()
-
-	if apiVersion < minVersion || apiVersion > maxVersion {
-		return fmt.Errorf("unsupported %s version: v%d not in range v%d-v%d", apiKey, apiVersion, minVersion, maxVersion)
-	}
-
-	r := &t.requests[apiVersion-minVersion]
-	v := valueOf(msg)
-	b := newPageBuffer()
-	defer b.unref()
-
-	e := &encoder{writer: b}
-	e.writeInt32(0) // placeholder for the request size
-	e.writeInt16(int16(apiKey))
-	e.writeInt16(apiVersion)
-	e.writeInt32(correlationID)
-
-	if r.flexible {
-		// Flexible messages use a nullable string for the client ID, then extra space for a
-		// tag buffer, which begins with a size value. Since we're not writing any fields into the
-		// latter, we can just write zero for now.
-		//
-		// See
-		// https://cwiki.apache.org/confluence/display/KAFKA/KIP-482%3A+The+Kafka+Protocol+should+Support+Optional+Tagged+Fields
-		// for details.
-		e.writeNullString(clientID)
-		e.writeUnsignedVarInt(0)
-	} else {
-		// Technically, recent versions of kafka interpret this field as a nullable
-		// string, however kafka 0.10 expected a non-nullable string and fails with
-		// a NullPointerException when it receives a null client id.
-		e.writeString(clientID)
-	}
-	r.encode(e, v)
-	err := e.err
-
-	if err == nil {
-		size := packUint32(uint32(b.Size()) - 4)
-		_, _ = b.WriteAt(size[:], 0)
-		_, err = b.WriteTo(w)
-	}
-
-	return err
 }
